@@ -1,0 +1,108 @@
+# ═══════════════════════════════════════════
+# Ship Hull Agent — 全局配置文件
+# ═══════════════════════════════════════════
+
+# 对话模型
+llm:
+  model: "Qwen/Qwen3-VL-4B-AWQ"
+  api_key: "abc123"
+  base_url: "http://localhost:7890/v1"
+  temperature: 0.0
+
+# Embedding 模型
+embed:
+  model: "Qwen3-Embedding-0.6B"
+  api_key: "abc123"
+  base_url: "http://localhost:7891/v1"
+
+# RAG 检索参数
+retrieval:
+  top_k: 3
+  score_threshold: 0.5
+
+# 向量库配置
+vector_store:
+  persist_path: "./vector_store"
+  auto_rebuild: false
+
+# 应用配置
+app:
+  log_level: "INFO"
+  # CSV 数据库路径（相对于项目根目录）
+  ship_db_path: "./data/ships.csv"
+
+# Pipeline 视频处理流水线配置
+pipeline:
+  # 级联/并发双模式
+  # false = 级联模式：同步等待 Agent 返回结果（简单但阻塞，FPS 低）
+  # true  = 并发模式：YOLO 不等待，Agent 异步推理（推荐，FPS 高）
+  concurrent_mode: true
+
+  # 最大并发 Agent 推理数
+  max_concurrent: 4
+
+  # 最大队列深度（并发模式下防止 OOM）
+  max_queued_frames: 30
+
+  # 每 N 帧处理一次（1 = 每帧都处理，15 = 每 15 帧触发一次 Agent）
+  # 并发模式下可设较小值（不阻塞），级联模式下建议设大（减少阻塞）
+  process_every_n_frames: 15
+
+  # 截图保存目录（每 N 帧触发时保存带检测框的渲染帧）
+  output_dir: "./output"
+
+  # 截图保存开关：true 则在识别到船只时自动保存截图，false 关闭
+  save_screenshots: true
+
+  # 提示词模式："detailed"（详细）或 "brief"（简略）
+  prompt_mode: "detailed"
+
+  # Agent/硬编码双模式开关
+  # false = 硬编码模式：直接调用 VLM + 查库 + 语义检索，无 LLM Agent 编排
+  # true  = Agent 模式：通过 LangChain ReAct Agent 链路调用 3 个工具（recognize_ship → lookup → retrieve）
+  use_agent: false
+
+  # 定时刷新开关：true 则每隔 gap_num 帧对已识别的 track 重新进行 Agent 识别
+  # false 则仅在新 track 出现时识别一次（现有逻辑不变）
+  enable_refresh: false
+
+  # 刷新间隔帧数（仅在 enable_refresh=true 时生效）
+  gap_num: 150
+
+  # Demo 开关：true 开启视频 demo 可视化，false 关闭
+  demo: false
+
+  # YOLO 模型路径
+  yolo_model: "yolov8n.pt"
+
+  # 推理设备："" 自动选择，"cpu" 强制 CPU，"0" 表示 GPU 0
+  device: ""
+
+  # 检测置信度阈值
+  conf_threshold: 0.25
+
+  # 每 N 帧检测一次 YOLO（1 = 每帧检测，2 = 隔帧检测可翻倍 FPS）
+  detect_every_n_frames: 2
+
+  # 追踪算法："bytetrack" 或 "botsort"
+  tracker: "bytetrack"
+
+  # 追踪器详细参数（传给 YOLO tracker YAML）
+  # 设为 null 则使用 ultralytics 内置默认值
+  tracker_params:
+    track_high_thresh: 0.5     # 高置信度阈值（首次匹配）
+    track_low_thresh: 0.05     # 低置信度阈值（二次匹配，降低以减少 track 碎片化）
+    new_track_thresh: 0.6      # 新轨迹创建阈值
+    track_buffer: 90           # 丢失后保留帧数（增大以减少 track 碎片化）
+    match_thresh: 0.5          # 匹配 IoU 阈值（降低以更宽松匹配）
+    # botsort 专用（bytetrack 忽略）
+    # proximity_thresh: 0.5
+    # appearance_thresh: 0.25
+    # gmc_method: "sparseOptFlow"
+
+  # 只检测 COCO 类别 8（船），null 表示检测所有类别
+  detect_classes:
+    - 8
+
+  # 超过此帧数未出现的 track 被清理
+  max_stale_frames: 300
