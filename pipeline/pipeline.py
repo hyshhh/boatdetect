@@ -113,6 +113,7 @@ class ShipPipeline:
 
         # OCR 弦号定位线程（独立于主线程）
         ocr_cfg = pipe_cfg.get("ocr_locator", {})
+        self._ocr_every_n: int = max(1, ocr_cfg.get("every_n_frames", 1))
         self._ocr_locator = OCRLocator(
             enabled=bool(ocr_cfg.get("enabled", True)),
             use_gpu=bool(ocr_cfg.get("use_gpu", False)),
@@ -708,7 +709,7 @@ class ShipPipeline:
             self._ocr_locator.start()
 
             logger.info(
-                "开始处理: source=%s, mode=%s, inference=%s, demo=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
+                "开始处理: source=%s, mode=%s, inference=%s, demo=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d, ocr_every=%d",
                 source,
                 "concurrent" if self._concurrent_mode else "cascade",
                 "agent" if self._use_agent else "hardcoded",
@@ -717,6 +718,7 @@ class ShipPipeline:
                 self._gap_num,
                 self._detect_every_n,
                 self._process_every_n,
+                self._ocr_every_n,
             )
 
             while True:
@@ -732,8 +734,9 @@ class ShipPipeline:
                 # FPS 统计
                 self._fps.tick("stream")
 
-                # ── 提交帧给 OCR 定位线程（独立并行，不阻塞主线程）──
-                self._ocr_locator.submit_frame(frame, frame_id)
+                # ── 每 N 帧提交给 OCR 定位线程（独立并行，不阻塞主线程）──
+                if frame_id % self._ocr_every_n == 0:
+                    self._ocr_locator.submit_frame(frame, frame_id)
 
                 # ── 每 N 帧进行 YOLO 检测，其余帧复用上次结果 ──
                 should_detect = (frame_id % self._detect_every_n == 0)
