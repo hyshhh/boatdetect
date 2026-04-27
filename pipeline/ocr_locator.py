@@ -92,6 +92,8 @@ class OCRLocator:
             # 注意：部分 PaddleOCR 版本不支持 use_gpu 参数
             # GPU 控制通过环境变量 CUDA_VISIBLE_DEVICES 或 PaddleOCR 内部自动检测
             self._ocr = PaddleOCR(
+                use_doc_orientation_classify=False,   # 禁用文档方向分类（船体OCR不需要）
+                use_doc_unwarping=False,               # 禁用文档矫正（船体OCR不需要）
                 use_textline_orientation=True,
                 lang=self._lang,
                 text_det_thresh=0.3,
