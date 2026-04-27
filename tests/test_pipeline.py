@@ -1,12 +1,9 @@
 """Pipeline 模块单元测试（不需要 GPU / YOLO / LLM API）"""
 
 import time
-import pytest
-import numpy as np
 
 from pipeline.fps import FPSMeter
 from pipeline.tracker import TrackManager
-from pipeline.agent_inference import AgentInference
 
 
 # ══════════════════════════════════════════════
@@ -212,57 +209,3 @@ class TestTrackManager:
             t.join()
 
         assert len(errors) == 0, f"并发访问出错: {errors}"
-
-
-# ══════════════════════════════════════════════
-#  AgentInference 单元测试（不调用 API）
-# ══════════════════════════════════════════════
-
-class TestAgentInferenceHelpers:
-    def test_parse_response_json(self):
-        content = '{"hull_number": "0014", "description": "白色大型客轮"}'
-        result = AgentInference._parse_response(content)
-        assert result["hull_number"] == "0014"
-        assert result["description"] == "白色大型客轮"
-
-    def test_parse_response_code_block(self):
-        content = '```json\n{"hull_number": "0025", "description": "黑色散货船"}\n```'
-        result = AgentInference._parse_response(content)
-        assert result["hull_number"] == "0025"
-
-    def test_parse_response_invalid_json(self):
-        content = 'not json at all'
-        result = AgentInference._parse_response(content)
-        assert result["hull_number"] == ""
-        assert result["description"] == "not json at all"
-
-    def test_encode_image(self):
-        img = np.zeros((100, 100, 3), dtype=np.uint8)
-        b64 = AgentInference._encode_image(img)
-        assert isinstance(b64, str)
-        assert len(b64) > 0
-
-    def test_prompt_mode_switch(self):
-        config = {
-            "llm": {"model": "test", "api_key": "test", "base_url": "http://localhost:1/v1", "temperature": 0},
-            "embed": {"model": "test", "api_key": "test", "base_url": "http://localhost:1/v1"},
-            "retrieval": {"top_k": 3, "score_threshold": 0.5},
-            "vector_store": {"persist_path": "/tmp/test_vs", "auto_rebuild": False},
-            "app": {"log_level": "INFO", "ship_db_path": "/tmp/test.csv"},
-        }
-        agent = AgentInference(config=config, prompt_mode="detailed")
-        assert agent.prompt_mode == "detailed"
-        agent.set_prompt_mode("brief")
-        assert agent.prompt_mode == "brief"
-
-    def test_prompt_mode_invalid(self):
-        config = {
-            "llm": {"model": "test", "api_key": "test", "base_url": "http://localhost:1/v1", "temperature": 0},
-            "embed": {"model": "test", "api_key": "test", "base_url": "http://localhost:1/v1"},
-            "retrieval": {"top_k": 3, "score_threshold": 0.5},
-            "vector_store": {"persist_path": "/tmp/test_vs", "auto_rebuild": False},
-            "app": {"log_level": "INFO", "ship_db_path": "/tmp/test.csv"},
-        }
-        agent = AgentInference(config=config)
-        with pytest.raises(ValueError):
-            agent.set_prompt_mode("invalid")

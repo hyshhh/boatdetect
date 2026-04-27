@@ -19,7 +19,6 @@ import time
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 
-import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
