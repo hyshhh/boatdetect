@@ -107,13 +107,11 @@ pipeline:
   # 超过此帧数未出现的 track 被清理
   max_stale_frames: 300
 
-  # OCR 弦号定位线程配置
-  # 独立于主线程，纯 OpenCV 形态学定位船体上的文字区域
-  # 定位结果以虚线框绘制在画面上，与主线程的检测框 demo 互不冲突
+  # OCR 弦号定位配置
+  # 对 YOLO 裁剪的 crop 做 OpenCV 形态学文字区域定位
+  # OCR 与 Agent 并行执行，定位框坐标自动转换到 frame 坐标系
   ocr_locator:
     enabled: true
-    max_queue_size: 5
-    every_n_frames: 3          # 每 N 帧提交一次 OCR（1=每帧，3=每3帧）
     nms_iou_threshold: 0.3     # NMS 去重 IoU 阈值（重叠超过此值的框合并）
     target_width: 640          # 缩放到此宽度处理（越大越精确，越慢）
     min_area_ratio: 0.0004     # 轮廓最小面积占帧面积比

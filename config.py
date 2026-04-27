@@ -62,7 +62,6 @@ _DEFAULTS: dict[str, Any] = {
         "max_stale_frames": 300,
         "ocr_locator": {
             "enabled": True,
-            "max_queue_size": 5,
             "nms_iou_threshold": 0.3,
             "target_width": 640,
             "min_area_ratio": 0.0004,

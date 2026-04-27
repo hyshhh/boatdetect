@@ -2,10 +2,10 @@
 ShipPipeline — 主流水线编排
 
 级联模式（concurrent_mode=false）：
-  YOLO 检测 → VLM识别 → 查库+语义检索 → 绑定结果 → 绘制输出
+  YOLO 检测 → OCR定位 + VLM识别（并行）→ 查库+语义检索 → 绑定结果 → 绘制输出
 
 并发模式（concurrent_mode=true）：
-  YOLO 检测 → crop 送入队列 → Agent 独立线程异步推理
+  YOLO 检测 → crop 送入队列 → Agent 线程异步推理（OCR + VLM 并行）
   → 结果按帧时间戳严格顺序出队 → 匹配到对应帧绘制输出
 
 双层并发架构：
@@ -20,6 +20,7 @@ import logging
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import cv2
@@ -111,12 +112,10 @@ class ShipPipeline:
         output_dir = pipe_cfg.get("output_dir", "./output")
         self._saver = ScreenshotSaver(output_dir=output_dir)
 
-        # OCR 弦号定位线程（独立于主线程）
+        # OCR 弦号定位器（同步调用，与 Agent 并行执行）
         ocr_cfg = pipe_cfg.get("ocr_locator", {})
-        self._ocr_every_n: int = max(1, ocr_cfg.get("every_n_frames", 1))
         self._ocr_locator = OCRLocator(
             enabled=bool(ocr_cfg.get("enabled", True)),
-            max_queue_size=ocr_cfg.get("max_queue_size", 5),
             nms_iou_threshold=ocr_cfg.get("nms_iou_threshold", 0.3),
             target_width=ocr_cfg.get("target_width", 640),
             min_area_ratio=ocr_cfg.get("min_area_ratio", 0.0004),
@@ -126,8 +125,8 @@ class ShipPipeline:
             min_gray_std=ocr_cfg.get("min_gray_std", 15.0),
         )
 
-        # OCR 结果缓存（OCR 线程慢于主线程，缓存最近一次结果复用）
-        self._last_ocr_result = None
+        # 级联模式下用于 OCR/Agent 并行的线程池
+        self._ocr_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ocr-para")
 
         # 并发模式相关
         self._task_queue: queue.Queue = queue.Queue(
@@ -442,12 +441,11 @@ class ShipPipeline:
         detections: list[Detection],
         frame_id: int,
     ) -> None:
-        """级联模式：同步处理每个需要识别的检测目标。"""
+        """级联模式：OCR + Agent 并行处理每个需要识别的检测目标。"""
         for det in detections:
             if det.crop is None or det.crop.size == 0:
                 continue
 
-            # 判断是否需要识别：新 track 或定时刷新
             need_new = self._tracker.needs_recognition(det.track_id)
             need_refresh = (
                 self._enable_refresh
@@ -467,8 +465,20 @@ class ShipPipeline:
                 content="定时刷新推理" if need_refresh else "同步推理开始",
             )
 
+            # crop 在 frame 中的偏移（用于 OCR 坐标转换）
+            crop_offset = (det.bbox[0], det.bbox[1])
+
             try:
+                # OCR 与 Agent 并行
+                ocr_future = self._ocr_executor.submit(
+                    self._ocr_locator.detect, det.crop, frame_id, crop_offset
+                )
                 agent_result = self._run_recognition(det.crop, track_id=det.track_id, frame_id=frame_id)
+
+                # 等 OCR 完成
+                ocr_result = ocr_future.result(timeout=5.0)
+                self._tracker.bind_ocr_boxes(det.track_id, ocr_result.boxes)
+
                 self._log_agent_trace(
                     "recognition_result",
                     track_id=det.track_id,
@@ -476,7 +486,8 @@ class ShipPipeline:
                     content=(
                         f"弦号={agent_result.hull_number or '(无)'} "
                         f"匹配={agent_result.match_type} "
-                        f"语义候选={agent_result.semantic_match_ids}"
+                        f"语义候选={agent_result.semantic_match_ids} "
+                        f"OCR框={len(ocr_result.boxes)}"
                     ),
                 )
                 self._handle_agent_result(det.track_id, frame_id, agent_result)
@@ -518,6 +529,7 @@ class ShipPipeline:
                 "timestamp": time.time(),
                 "track_id": det.track_id,
                 "crop": det.crop.copy(),
+                "crop_offset": (det.bbox[0], det.bbox[1]),
             }
 
             try:
@@ -538,7 +550,7 @@ class ShipPipeline:
                 self._tracker.cancel_pending(det.track_id)
 
     def _agent_worker_loop(self) -> None:
-        """Agent 工作线程：从队列取任务并推理。"""
+        """Agent 工作线程：从队列取任务，OCR + Agent 并行推理。"""
         try:
             while not self._stop_event.is_set():
                 try:
@@ -549,6 +561,7 @@ class ShipPipeline:
                 track_id = task["track_id"]
                 frame_id = task["frame_id"]
                 crop = task["crop"]
+                crop_offset = task.get("crop_offset", (0, 0))
 
                 self._log_agent_trace(
                     "concurrent_infer_start",
@@ -558,20 +571,28 @@ class ShipPipeline:
                 )
 
                 try:
+                    # OCR 与 Agent 并行
+                    ocr_future = self._ocr_executor.submit(
+                        self._ocr_locator.detect, crop, frame_id, crop_offset
+                    )
                     agent_result = self._run_recognition(crop, track_id=track_id, frame_id=frame_id)
+
+                    ocr_result = ocr_future.result(timeout=5.0)
+                    ocr_boxes = ocr_result.boxes
                 except Exception as e:
                     logger.exception("Agent 推理异常 (track=%d, frame=%d)", track_id, frame_id)
                     agent_result = AgentResult(answer=str(e))
+                    ocr_boxes = []
 
                 try:
                     self._result_queue.put_nowait({
                         "frame_id": frame_id,
                         "track_id": track_id,
                         "agent_result": agent_result,
+                        "ocr_boxes": ocr_boxes,
                     })
                 except queue.Full:
                     logger.warning("结果队列已满，丢弃结果 (track=%d, frame=%d)", track_id, frame_id)
-                    # 结果队列满时直接绑定空结果，避免 track 卡死
                     self._tracker.bind_result(track_id, hull_number="", description="", frame_id=frame_id)
         except Exception:
             logger.exception("Agent 工作线程意外退出")
@@ -585,6 +606,11 @@ class ShipPipeline:
                 track_id = pending["track_id"]
                 frame_id = pending["frame_id"]
                 agent_result = pending["agent_result"]
+                ocr_boxes = pending.get("ocr_boxes", [])
+
+                # 绑定 OCR 结果
+                if ocr_boxes:
+                    self._tracker.bind_ocr_boxes(track_id, ocr_boxes)
 
                 # 有任何有效信息（弦号/语义匹配/非失败回答）都算有效结果
                 if (agent_result.hull_number
@@ -647,7 +673,6 @@ class ShipPipeline:
         frame: np.ndarray,
         detections: list[Detection],
         frame_id: int,
-        ocr_result=None,
     ) -> np.ndarray:
         """通过 DemoRenderer 在帧上绘制检测框、识别结果、HUD 和 OCR 定位虚线框。"""
         return self._renderer.render(
@@ -658,7 +683,6 @@ class ShipPipeline:
             frame_id=frame_id,
             queue_depth=self._task_queue.qsize(),
             max_queue=self._max_queued_frames,
-            ocr_result=ocr_result,
         )
 
     # ── 主流程 ──────────────────────────────────
@@ -710,11 +734,8 @@ class ShipPipeline:
             if self._concurrent_mode:
                 self._start_agent_workers()
 
-            # 启动 OCR 定位线程
-            self._ocr_locator.start()
-
             logger.info(
-                "开始处理: source=%s, mode=%s, inference=%s, demo=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d, ocr_every=%d",
+                "开始处理: source=%s, mode=%s, inference=%s, demo=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
                 source,
                 "concurrent" if self._concurrent_mode else "cascade",
                 "agent" if self._use_agent else "hardcoded",
@@ -723,7 +744,6 @@ class ShipPipeline:
                 self._gap_num,
                 self._detect_every_n,
                 self._process_every_n,
-                self._ocr_every_n,
             )
 
             while True:
@@ -738,10 +758,6 @@ class ShipPipeline:
 
                 # FPS 统计
                 self._fps.tick("stream")
-
-                # ── 每 N 帧提交给 OCR 定位线程（独立并行，不阻塞主线程）──
-                if frame_id % self._ocr_every_n == 0:
-                    self._ocr_locator.submit_frame(frame, frame_id)
 
                 # ── 每 N 帧进行 YOLO 检测，其余帧复用上次结果 ──
                 should_detect = (frame_id % self._detect_every_n == 0)
@@ -783,18 +799,9 @@ class ShipPipeline:
 
                 # 渲染输出
                 if self._demo_enabled or output_path or display:
-                    # 收集 OCR 定位结果：排空队列，只保留最新的（OCR 线程慢于主线程）
-                    while True:
-                        newer = self._ocr_locator.get_result(timeout=0.0)
-                        if newer is None:
-                            break
-                        self._last_ocr_result = newer
-
                     with self._latency.measure("demo"):
-                        display_frame = self._render_frame(frame, last_detections, frame_id, ocr_result=self._last_ocr_result)
+                        display_frame = self._render_frame(frame, last_detections, frame_id)
                 else:
-                    # 即使不渲染，也要排空 OCR 结果队列防止堆积
-                    self._ocr_locator.drain_results()
                     display_frame = frame
 
                 # 每 N 帧：有已识别的 track 就保存截图（需开启 save_screenshots）
@@ -847,11 +854,9 @@ class ShipPipeline:
                             trace_str = f" | 近期处理: {recent_tracks} tracks"
 
                     logger.info(
-                        "FPS: stream=%.1f process=%.1f | frames=%d elapsed=%ds tracks=%d%s%s | OCR: %d frames %.1fms avg",
+                        "FPS: stream=%.1f process=%.1f | frames=%d elapsed=%ds tracks=%d%s%s",
                         stream_fps, process_fps, frame_id, int(elapsed),
                         len(self._tracker), latency_str, trace_str,
-                        self._ocr_locator.stats["processed_frames"],
-                        self._ocr_locator.stats["avg_latency_ms"],
                     )
 
             # ── 处理完成，收集统计 ──
@@ -859,16 +864,6 @@ class ShipPipeline:
             # 并发模式下最终排空结果
             if self._concurrent_mode:
                 self._drain_results()
-
-            # 最终排空 OCR 结果队列（带超时等待，确保最后几帧的 OCR 结果不丢失）
-            if self._ocr_locator.is_running:
-                t0 = time.time()
-                while time.time() - t0 < 5.0:  # 最多等 5 秒
-                    newer = self._ocr_locator.get_result(timeout=0.5)
-                    if newer is not None:
-                        self._last_ocr_result = newer
-                    elif self._ocr_locator._input_queue.empty():
-                        break  # 输入队列也空了，没有更多任务
 
             elapsed = time.time() - start_time
             tracks = self._tracker.active_tracks
@@ -885,7 +880,6 @@ class ShipPipeline:
                 "inference": "agent" if self._use_agent else "hardcoded",
                 "screenshots_saved": self._saver.saved_count,
                 "latency": self._latency.get_all_stats(),
-                "ocr_locator": self._ocr_locator.stats,
             }
 
             logger.info("=" * 50)
@@ -918,7 +912,7 @@ class ShipPipeline:
         finally:
             if self._concurrent_mode:
                 self._stop_agent_workers()
-            self._ocr_locator.stop()
+            self._ocr_executor.shutdown(wait=False)
             input_src.release()
             if video_writer:
                 video_writer.release()

@@ -118,7 +118,6 @@ class DemoRenderer:
         frame_id: int = 0,
         queue_depth: int = 0,
         max_queue: int = 0,
-        ocr_result: Any = None,
     ) -> np.ndarray:
         """
         在帧上渲染所有可视化信息。
@@ -131,16 +130,14 @@ class DemoRenderer:
             frame_id: 当前帧号。
             queue_depth: 当前队列深度。
             max_queue: 最大队列深度。
-            ocr_result: OCR 定位结果（OCRResult），包含文字框列表。
 
         Returns:
             渲染后的帧。
         """
         canvas = frame.copy()
 
-        # 渲染 OCR 定位虚线框（在检测框之前绘制，不冲突）
-        if ocr_result is not None:
-            self._render_ocr_boxes(canvas, ocr_result)
+        # 渲染 OCR 定位虚线框（从 TrackInfo 中读取，绘制在检测框之前）
+        self._render_ocr_from_tracks(canvas, tracks)
 
         # 渲染检测框
         for det in detections:
@@ -161,35 +158,13 @@ class DemoRenderer:
 
         return canvas
 
-    def _render_ocr_boxes(self, canvas: np.ndarray, ocr_result: Any) -> None:
-        """渲染 OCR 定位结果的虚线框和文字。"""
-        boxes = getattr(ocr_result, "boxes", [])
-        texts = getattr(ocr_result, "texts", [])
-        confidences = getattr(ocr_result, "confidences", [])
-
-        for i, box in enumerate(boxes):
-            if box is None:
-                continue
-
-            # 绘制虚线矩形框
-            self._draw_dashed_polygon(canvas, box, color=(0, 255, 255), thickness=1)
-
-            # 在框上方显示识别到的文字
-            if i < len(texts) and texts[i]:
-                text = texts[i]
-                conf = confidences[i] if i < len(confidences) else 0.0
-                label = f"{text} ({conf:.2f})"
-
-                # 文字位置：框的左上角上方
-                x = int(box[0][0])
-                y = max(int(box[0][1]) - 6, 12)
-
-                cv2.putText(
-                    canvas, label,
-                    (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35, (0, 255, 255), 1,
-                )
+    def _render_ocr_from_tracks(self, canvas: np.ndarray, tracks: dict[int, Any]) -> None:
+        """从 TrackInfo 中读取 OCR 框并渲染虚线框。"""
+        for track_id, info in tracks.items():
+            boxes = getattr(info, "ocr_boxes", [])
+            for box in boxes:
+                if box is not None:
+                    self._draw_dashed_polygon(canvas, box, color=(0, 255, 255), thickness=1)
 
     @staticmethod
     def _draw_dashed_polygon(

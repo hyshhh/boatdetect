@@ -29,6 +29,7 @@ class TrackInfo:
     db_match_desc: str = ""        # 数据库匹配到的描述
     db_matched: bool = False       # 是否在数据库中精确匹配到
     semantic_match_ids: list[str] = field(default_factory=list)  # 语义检索匹配到的弦号列表
+    ocr_boxes: list = field(default_factory=list)               # OCR 文字区域框（frame 坐标，4x2 ndarray）
 
 
 class TrackManager:
@@ -164,6 +165,16 @@ class TrackManager:
         with self._lock:
             if track_id in self._tracks:
                 self._tracks[track_id].semantic_match_ids = match_ids
+
+    def bind_ocr_boxes(
+        self,
+        track_id: int,
+        boxes: list,
+    ) -> None:
+        """绑定 OCR 文字区域框（frame 坐标系）。"""
+        with self._lock:
+            if track_id in self._tracks:
+                self._tracks[track_id].ocr_boxes = boxes
 
     def get_display_text(self, track_id: int) -> str:
         """

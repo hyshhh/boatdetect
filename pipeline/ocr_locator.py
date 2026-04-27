@@ -1,17 +1,14 @@
 """
-OCRLocator — 纯 OpenCV 文字区域定位线程
+OCRLocator — 纯 OpenCV 文字区域定位（同步，无独立线程）
 
-独立于主线程运行，每帧接收图像，用形态学 + 轮廓检测定位船体上的文字区域，
-输出定位框（虚线框），与主线程的 demo 渲染互不冲突。
+接收 YOLO crop 图像，用形态学 + 轮廓检测定位文字区域，
+返回的 box 坐标已转换到原图（frame）坐标系。
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from dataclasses import dataclass, field
-from queue import Queue, Empty
 
 import cv2
 import numpy as np
@@ -21,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OCRResult:
-    """单帧的文字定位结果（仅位置，无识别文本）。"""
+    """单次文字定位结果（坐标已转换到 frame 坐标系）。"""
     frame_id: int
     boxes: list[np.ndarray] = field(default_factory=list)   # 每个 box 是 4x2 的 ndarray
     timestamp: float = 0.0
@@ -36,9 +33,7 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     x2 = min(ax + aw, bx + bw)
     y2 = min(ay + ah, by + bh)
     inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area_a = aw * ah
-    area_b = bw * bh
-    union = area_a + area_b - inter
+    union = aw * ah + bw * bh - inter
     return inter / union if union > 0 else 0.0
 
 
@@ -65,19 +60,17 @@ def _nms_rects(
 
 class OCRLocator:
     """
-    文字区域定位器 — 独立线程，纯 OpenCV 实现。
+    文字区域定位器 — 纯 OpenCV，同步调用。
 
-    工作流程：
-    1. 主线程将 frame 送入输入队列
-    2. 定位线程从队列取帧，检测文字区域轮廓
-    3. 结果（bounding boxes）放入输出队列
-    4. 主线程从输出队列取结果，绘制虚线框
+    用法：
+        locator = OCRLocator(nms_iou_threshold=0.3)
+        result = locator.detect(crop, frame_id=1, offset=(x1, y1))
+        # result.boxes 已经是 frame 坐标系
     """
 
     def __init__(
         self,
         enabled: bool = True,
-        max_queue_size: int = 5,
         nms_iou_threshold: float = 0.3,
         target_width: int = 640,
         min_area_ratio: float = 0.0004,
@@ -95,112 +88,41 @@ class OCRLocator:
         self._min_edge_density = min_edge_density
         self._min_gray_std = min_gray_std
 
-        self._input_queue: Queue = Queue(maxsize=max_queue_size)
-        self._output_queue: Queue = Queue(maxsize=max_queue_size)
-        self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
-        self._processed_count = 0
-        self._total_latency_ms = 0.0
+    def detect(
+        self,
+        crop: np.ndarray,
+        frame_id: int = 0,
+        offset: tuple[int, int] = (0, 0),
+    ) -> OCRResult:
+        """
+        对 crop 图像做文字区域检测，返回 frame 坐标系下的结果。
 
-        if enabled:
-            logger.info("OCRLocator 初始化: nms_iou=%.2f, target_w=%d", nms_iou_threshold, target_width)
-        else:
-            logger.info("OCRLocator 已禁用")
+        Args:
+            crop: YOLO 裁剪出的船体图像（BGR）。
+            frame_id: 帧号。
+            offset: crop 在原图中的左上角偏移 (x_offset, y_offset)。
 
-    def start(self) -> None:
-        if not self._enabled:
-            return
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._worker_loop, name="ocr-locator", daemon=True)
-        self._thread.start()
-        logger.info("OCR 定位线程已启动")
+        Returns:
+            OCRResult，boxes 已转换到 frame 坐标系。
+        """
+        if not self._enabled or crop is None or crop.size == 0:
+            return OCRResult(frame_id=frame_id)
 
-    def stop(self, timeout: float = 5.0) -> None:
-        thread = self._thread
-        if thread is None:
-            return
-        self._stop_event.set()
-        thread.join(timeout=timeout)
-        self._thread = None
-        for q in (self._input_queue, self._output_queue):
-            while True:
-                try:
-                    q.get_nowait()
-                except Empty:
-                    break
-        avg = self._total_latency_ms / max(1, self._processed_count)
-        logger.info("OCR 定位线程已停止，共处理 %d 帧，平均 %.1fms", self._processed_count, avg)
-
-    def submit_frame(self, frame: np.ndarray, frame_id: int) -> bool:
-        if not self._enabled:
-            return False
-        thread = self._thread
-        if thread is None or not thread.is_alive():
-            return False
-        try:
-            self._input_queue.put_nowait({"frame": frame.copy(), "frame_id": frame_id})
-            return True
-        except Exception:
-            return False
-
-    def get_result(self, timeout: float = 0.0) -> OCRResult | None:
-        try:
-            return self._output_queue.get(timeout=timeout)
-        except Empty:
-            return None
-
-    def drain_results(self) -> list[OCRResult]:
-        results = []
-        while True:
-            try:
-                results.append(self._output_queue.get_nowait())
-            except Empty:
-                break
-        return results
-
-    # ── 内部 ──────────────────────────────────────
-
-    def _worker_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                task = self._input_queue.get(timeout=0.5)
-            except Empty:
-                continue
-
-            t0 = time.perf_counter()
-            result = self._detect_text_regions(task["frame"], task["frame_id"])
-            self._total_latency_ms += (time.perf_counter() - t0) * 1000
-            self._processed_count += 1
-
-            try:
-                self._output_queue.put_nowait(result)
-            except Exception:
-                try:
-                    self._output_queue.get_nowait()
-                except Empty:
-                    pass
-                try:
-                    self._output_queue.put_nowait(result)
-                except Exception:
-                    pass
-
-    def _detect_text_regions(self, frame: np.ndarray, frame_id: int) -> OCRResult:
-        """缩小 → 边缘检测 → 水平膨胀 → 轮廓 → 多重过滤 → NMS"""
+        import time
         result = OCRResult(frame_id=frame_id, timestamp=time.time())
-        h_orig, w_orig = frame.shape[:2]
+        ox, oy = offset
+        h_orig, w_orig = crop.shape[:2]
 
         try:
-            # 缩小
+            # 缩小到 target_width
             scale = self._target_width / w_orig
-            small = cv2.resize(frame, (self._target_width, int(h_orig * scale)))
+            small = cv2.resize(crop, (self._target_width, int(h_orig * scale)))
             h, w = small.shape[:2]
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
             blurred = cv2.GaussianBlur(gray, (3, 3), 0)
             edges = cv2.Canny(blurred, 80, 200)
 
-            # 水平膨胀，把同行文字边缘连成条
+            # 水平膨胀
             kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (18, 2))
             dilated = cv2.dilate(edges, kernel_h, iterations=1)
 
@@ -235,12 +157,12 @@ class OCRLocator:
                 if np.std(roi_gray) < self._min_gray_std:
                     continue
 
-                # 映射回原图坐标
+                # 映射回 crop 坐标，再加 offset 转到 frame 坐标
                 pad = int(3 / scale)
-                x1 = max(0, int(x / scale) - pad)
-                y1 = max(0, int(y / scale) - pad)
-                x2 = min(w_orig, int((x + cw) / scale) + pad)
-                y2 = min(h_orig, int((y + ch) / scale) + pad)
+                x1 = max(0, int(x / scale) - pad) + ox
+                y1 = max(0, int(y / scale) - pad) + oy
+                x2 = int((x + cw) / scale) + pad + ox
+                y2 = int((y + ch) / scale) + pad + oy
 
                 candidates.append((x1, y1, x2 - x1, y2 - y1))
                 candidate_boxes.append(
@@ -262,17 +184,3 @@ class OCRLocator:
     @property
     def enabled(self) -> bool:
         return self._enabled
-
-    @property
-    def is_running(self) -> bool:
-        thread = self._thread
-        return thread is not None and thread.is_alive()
-
-    @property
-    def stats(self) -> dict:
-        avg = self._total_latency_ms / max(1, self._processed_count)
-        return {
-            "processed_frames": self._processed_count,
-            "avg_latency_ms": round(avg, 1),
-            "is_running": self.is_running,
-        }
