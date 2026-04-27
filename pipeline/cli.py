@@ -183,6 +183,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # 在 argparse 解析前移除注入的 gflags 参数
+    gflags_args = {"--enable_new_executor", "--use_mkldnn", "--enable_pir_api"}
+    sys.argv = [arg for arg in sys.argv if not any(arg.startswith(f"{g}=") for g in gflags_args)]
+
     parser = build_parser()
     args = parser.parse_args()
 
