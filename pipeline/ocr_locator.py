@@ -90,10 +90,11 @@ class OCRLocator:
             return
         try:
             from paddleocr import PaddleOCR
+            # 注意：部分 PaddleOCR 版本不支持 use_gpu 参数
+            # GPU 控制通过环境变量 CUDA_VISIBLE_DEVICES 或 PaddleOCR 内部自动检测
             self._ocr = PaddleOCR(
                 use_textline_orientation=True,
                 lang=self._lang,
-                use_gpu=self._use_gpu,
                 show_log=False,
                 text_det_thresh=0.3,
                 text_det_box_thresh=0.5,
@@ -125,13 +126,14 @@ class OCRLocator:
 
     def stop(self, timeout: float = 5.0) -> None:
         """停止 OCR 定位线程。"""
-        if self._thread is None:
+        thread = self._thread
+        if thread is None:
             return
 
         self._stop_event.set()
-        self._thread.join(timeout=timeout)
-        if self._thread.is_alive():
-            logger.warning("OCR 定位线程未在超时内退出")
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning("OCR 定位线程未在超时内退出（daemon 线程，进程退出时自动回收）")
         self._thread = None
 
         # 排空队列
@@ -163,7 +165,12 @@ class OCRLocator:
         Returns:
             True 提交成功，False 队列满或未启用。
         """
-        if not self._enabled or self._thread is None:
+        if not self._enabled:
+            return False
+
+        # 先检查线程是否存活（避免无意义的入队）
+        thread = self._thread
+        if thread is None or not thread.is_alive():
             return False
 
         try:
@@ -223,19 +230,20 @@ class OCRLocator:
             self._processed_count += 1
             self._total_latency_ms += latency_ms
 
-            # 放入输出队列（满了就丢弃旧的）
+            # 放入输出队列（满了就丢弃旧的，保证不阻塞）
             try:
                 self._output_queue.put_nowait(result)
             except Exception:
-                # 队列满，丢弃最旧的
+                # 队列满，尝试丢弃最旧的为新结果腾出空间
                 try:
                     self._output_queue.get_nowait()
                 except Empty:
                     pass
+                # 无论丢弃是否成功，都尝试放入新结果
                 try:
                     self._output_queue.put_nowait(result)
                 except Exception:
-                    pass
+                    logger.debug("OCR 输出队列满，丢弃结果 (frame=%d)", frame_id)
 
     def _process_frame(self, frame: np.ndarray, frame_id: int) -> OCRResult:
         """
@@ -294,7 +302,8 @@ class OCRLocator:
 
     @property
     def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     @property
     def stats(self) -> dict:

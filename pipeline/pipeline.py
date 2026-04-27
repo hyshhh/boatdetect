@@ -592,6 +592,10 @@ class ShipPipeline:
 
     def _start_agent_workers(self) -> None:
         """启动 Agent 工作线程池。"""
+        # 防御性地先停止旧 workers（避免重复调用导致线程泄漏）
+        if self._agent_workers:
+            self._stop_agent_workers()
+
         self._stop_event.clear()
         self._agent_workers.clear()
         for i in range(self._max_concurrent):
