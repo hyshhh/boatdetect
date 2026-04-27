@@ -162,17 +162,22 @@ class OCRLocator:
 
     def _detect_text_regions(self, frame: np.ndarray, frame_id: int) -> OCRResult:
         """
-        纯 OpenCV 文字区域检测：
-        灰度 → 自适应二值化 → 形态学膨胀 → 轮廓 → 过滤
+        纯 OpenCV 文字区域检测（优化版）：
+        先缩小到 640px 宽 → 灰度 → 二值化 → 形态学 → 轮廓 → 映射回原坐标
         """
         result = OCRResult(frame_id=frame_id, timestamp=time.time())
-        h_frame, w_frame = frame.shape[:2]
-        frame_area = h_frame * w_frame
+        h_orig, w_orig = frame.shape[:2]
 
         try:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # 1. 缩小到 640px 宽（大幅减少计算量）
+            target_w = 640
+            scale = target_w / w_orig
+            small = cv2.resize(frame, (target_w, int(h_orig * scale)))
+            h, w = small.shape[:2]
 
-            # 自适应二值化，突出文字笔画
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+            # 2. 自适应二值化
             binary = cv2.adaptiveThreshold(
                 gray, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -180,34 +185,40 @@ class OCRLocator:
                 blockSize=15, C=10,
             )
 
-            # 水平方向膨胀，把同一行的文字连成条状
-            kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
-            dilated = cv2.dilate(binary, kernel_h, iterations=2)
+            # 3. 水平膨胀，把同行文字连成条
+            kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 2))
+            dilated = cv2.dilate(binary, kernel_h, iterations=1)
 
+            # 4. 查找轮廓（限制数量）
             contours, _ = cv2.findContours(
                 dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
             )
 
+            # 只处理前 200 个轮廓（按面积降序）
+            if len(contours) > 200:
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)[:200]
+
+            frame_area = h * w
             for cnt in contours:
-                x, y, w, h = cv2.boundingRect(cnt)
-                area = w * h
+                x, y, cw, ch = cv2.boundingRect(cnt)
+                area = cw * ch
 
-                # 面积过滤：太小的噪点、太大的整块区域
-                if area < frame_area * 0.0002 or area > frame_area * 0.12:
+                # 面积过滤
+                if area < frame_area * 0.0003 or area > frame_area * 0.15:
                     continue
-                # 宽高比：文字条通常是横向的
-                if w < h * 0.8:
+                # 宽高比：文字条是横向的
+                if cw < ch * 0.8:
                     continue
-                # 尺寸：宽至少 30px，高至少 8px
-                if w < 30 or h < 8:
+                # 最小尺寸
+                if cw < 20 or ch < 6:
                     continue
 
-                # 稍微扩大一点，让框更完整
-                pad = 4
-                x1 = max(0, x - pad)
-                y1 = max(0, y - pad)
-                x2 = min(w_frame, x + w + pad)
-                y2 = min(h_frame, y + h + pad)
+                # 映射回原图坐标
+                pad = int(4 / scale)
+                x1 = max(0, int(x / scale) - pad)
+                y1 = max(0, int(y / scale) - pad)
+                x2 = min(w_orig, int((x + cw) / scale) + pad)
+                y2 = min(h_orig, int((y + ch) / scale) + pad)
 
                 box = np.array([
                     [x1, y1], [x2, y1], [x2, y2], [x1, y2]
