@@ -77,6 +77,8 @@ class OCRLocator:
         # 统计
         self._processed_count = 0
         self._total_latency_ms = 0.0
+        self._ocr_failure_count = 0       # OCR 连续失败计数
+        self._ocr_permanently_failed = False  # 标记 OCR 是否已判定为不可用
 
         if enabled:
             logger.info("OCRLocator 初始化: lang=%s, gpu=%s", lang, use_gpu)
@@ -219,6 +221,10 @@ class OCRLocator:
             except Empty:
                 continue
 
+            # OCR 已判定不可用，直接跳过
+            if self._ocr_permanently_failed:
+                continue
+
             frame = task["frame"]
             frame_id = task["frame_id"]
 
@@ -264,11 +270,20 @@ class OCRLocator:
             except TypeError:
                 ocr_output = self._ocr.predict(frame)
         except Exception as e:
-            logger.warning("OCR 处理异常 (frame=%d): %s", frame_id, e)
+            self._ocr_failure_count += 1
+            if self._ocr_failure_count <= 3:
+                logger.warning("OCR 处理异常 (frame=%d): %s", frame_id, e)
+            elif self._ocr_failure_count == 4:
+                logger.warning("OCR 持续失败，后续警告已抑制。可能是 PaddlePaddle PIR+OneDNN 兼容性问题。")
+                self._ocr_permanently_failed = True
             return result
 
         if not ocr_output:
             return result
+
+        # OCR 成功，重置失败计数
+        self._ocr_failure_count = 0
+        self._ocr_permanently_failed = False
 
         # 调试：打印 PaddleOCR 输出格式（只打印前 3 帧）
         if frame_id <= 3:
