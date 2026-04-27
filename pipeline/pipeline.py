@@ -120,6 +120,9 @@ class ShipPipeline:
             max_queue_size=ocr_cfg.get("max_queue_size", 5),
         )
 
+        # OCR 结果缓存（OCR 线程慢于主线程，缓存最近一次结果复用）
+        self._last_ocr_result = None
+
         # 并发模式相关
         self._task_queue: queue.Queue = queue.Queue(
             maxsize=self._max_queued_frames
@@ -772,11 +775,15 @@ class ShipPipeline:
 
                 # 渲染输出
                 if self._demo_enabled or output_path or display:
-                    # 收集 OCR 定位结果（非阻塞）
-                    ocr_result = self._ocr_locator.get_result(timeout=0.0)
+                    # 收集 OCR 定位结果：排空队列，只保留最新的（OCR 线程慢于主线程）
+                    while True:
+                        newer = self._ocr_locator.get_result(timeout=0.0)
+                        if newer is None:
+                            break
+                        self._last_ocr_result = newer
 
                     with self._latency.measure("demo"):
-                        display_frame = self._render_frame(frame, last_detections, frame_id, ocr_result=ocr_result)
+                        display_frame = self._render_frame(frame, last_detections, frame_id, ocr_result=self._last_ocr_result)
                 else:
                     # 即使不渲染，也要排空 OCR 结果队列防止堆积
                     self._ocr_locator.drain_results()
