@@ -855,6 +855,16 @@ class ShipPipeline:
             if self._concurrent_mode:
                 self._drain_results()
 
+            # 最终排空 OCR 结果队列（带超时等待，确保最后几帧的 OCR 结果不丢失）
+            if self._ocr_locator.is_running:
+                t0 = time.time()
+                while time.time() - t0 < 5.0:  # 最多等 5 秒
+                    newer = self._ocr_locator.get_result(timeout=0.5)
+                    if newer is not None:
+                        self._last_ocr_result = newer
+                    elif self._ocr_locator._input_queue.empty():
+                        break  # 输入队列也空了，没有更多任务
+
             elapsed = time.time() - start_time
             tracks = self._tracker.active_tracks
             total_recognized = sum(1 for t in tracks.values() if t.recognized)
