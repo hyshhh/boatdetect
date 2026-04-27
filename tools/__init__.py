@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from typing import Annotated
 
 import cv2
@@ -19,14 +20,18 @@ logger = logging.getLogger(__name__)
 
 # ── 配置缓存（避免每次推理都读磁盘）──
 _cached_llm_cfg: dict | None = None
+_cfg_lock = threading.Lock()
 
 
 def _get_llm_cfg() -> dict:
-    """获取 LLM 配置（带缓存）。"""
+    """获取 LLM 配置（带缓存，线程安全）。"""
     global _cached_llm_cfg
     if _cached_llm_cfg is None:
-        config = load_config()
-        _cached_llm_cfg = config.get("llm", {})
+        with _cfg_lock:
+            # 双重检查锁定：避免重复加载
+            if _cached_llm_cfg is None:
+                config = load_config()
+                _cached_llm_cfg = config.get("llm", {})
     return _cached_llm_cfg
 
 
