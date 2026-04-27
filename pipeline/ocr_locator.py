@@ -14,27 +14,12 @@ OCRLocator — 基于 PaddleOCR 的弦号文字定位线程
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 
 import numpy as np
-
-# ═══════════════════════════════════════════════════════════════════════
-# 修复 PaddlePaddle 3.x PIR + OneDNN 兼容性问题
-# 错误: ConvertPirAttribute2RuntimeAttribute not support
-#       [pir::ArrayAttribute<pir::DoubleAttribute>]
-#
-# 必须在 import paddle 之前设置。paddle 在进程启动时就会被某些依赖
-# （如 faiss、ultralytics 等）间接导入，所以放在模块顶层才能确保生效。
-# ═══════════════════════════════════════════════════════════════════════
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["FLAGS_enable_pir_in_executor"] = "0"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["FLAGS_enable_mkldnn"] = "0"
-os.environ["FLAGS_pir_apply_inplace_pass"] = "0"
 
 logger = logging.getLogger(__name__)
 
@@ -103,27 +88,17 @@ class OCRLocator:
         if self._ocr is not None:
             return
         try:
-            # 先 import paddle 并强制设置 flags，再 import PaddleOCR
-            try:
-                import paddle
-                paddle.set_flags({
-                    "FLAGS_use_mkldnn": 0,
-                    "FLAGS_enable_pir_api": 0,
-                })
-            except Exception:
-                pass  # set_flags 不可用时依赖模块级环境变量
-
             from paddleocr import PaddleOCR
-            # 注意：部分 PaddleOCR 版本不支持 use_gpu 参数
-            # GPU 控制通过环境变量 CUDA_VISIBLE_DEVICES 或 PaddleOCR 内部自动检测
+            # PaddleOCR 2.x API — 不受 PaddlePaddle 3.x PIR+OneDNN bug 影响
+            # 使用 PP-OCRv4 模型，识别效果好且稳定
             self._ocr = PaddleOCR(
-                use_doc_orientation_classify=False,   # 禁用文档方向分类（船体OCR不需要）
-                use_doc_unwarping=False,               # 禁用文档矫正（船体OCR不需要）
-                use_textline_orientation=True,
+                use_angle_cls=True,
                 lang=self._lang,
-                text_det_thresh=0.3,
-                text_det_box_thresh=0.5,
-                text_recognition_batch_size=1,
+                det_db_thresh=0.3,
+                det_db_box_thresh=0.5,
+                rec_batch_num=1,
+                use_gpu=self._use_gpu,
+                show_log=False,
             )
             logger.info("PaddleOCR 模型加载完成")
         except Exception as e:
