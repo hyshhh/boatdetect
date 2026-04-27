@@ -88,6 +88,11 @@ class OCRLocator:
         if self._ocr is not None:
             return
         try:
+            import os
+            # 修复 PaddlePaddle 3.x PIR + OneDNN 兼容性问题
+            # "ConvertPirAttribute2RuntimeAttribute not support pir::ArrayAttribute<pir::DoubleAttribute>"
+            os.environ.setdefault("FLAGS_enable_pir_api", "0")
+
             from paddleocr import PaddleOCR
             # 注意：部分 PaddleOCR 版本不支持 use_gpu 参数
             # GPU 控制通过环境变量 CUDA_VISIBLE_DEVICES 或 PaddleOCR 内部自动检测
