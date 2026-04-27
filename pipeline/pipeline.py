@@ -116,9 +116,14 @@ class ShipPipeline:
         self._ocr_every_n: int = max(1, ocr_cfg.get("every_n_frames", 1))
         self._ocr_locator = OCRLocator(
             enabled=bool(ocr_cfg.get("enabled", True)),
-            use_gpu=bool(ocr_cfg.get("use_gpu", False)),
-            lang=ocr_cfg.get("lang", "ch"),
             max_queue_size=ocr_cfg.get("max_queue_size", 5),
+            nms_iou_threshold=ocr_cfg.get("nms_iou_threshold", 0.3),
+            target_width=ocr_cfg.get("target_width", 640),
+            min_area_ratio=ocr_cfg.get("min_area_ratio", 0.0004),
+            max_area_ratio=ocr_cfg.get("max_area_ratio", 0.1),
+            min_aspect_ratio=ocr_cfg.get("min_aspect_ratio", 1.5),
+            min_edge_density=ocr_cfg.get("min_edge_density", 0.08),
+            min_gray_std=ocr_cfg.get("min_gray_std", 15.0),
         )
 
         # OCR 结果缓存（OCR 线程慢于主线程，缓存最近一次结果复用）
