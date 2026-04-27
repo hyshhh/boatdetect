@@ -1,14 +1,18 @@
 """
-OCRLocator — 基于 PaddleOCR 的弦号文字定位线程
+OCRLocator — 基于 Tesseract OCR 的弦号文字定位线程
 
 独立于主线程运行，每帧接收图像，使用 OCR 检测船体上的文字区域，
 输出文字定位框（虚线框），与主线程的 demo 渲染互不冲突。
 
 功能：
   - 独立线程运行，不阻塞主线程的 YOLO 检测和 Agent 推理
-  - 使用 PaddleOCR 的文字检测+识别，直接定位弦号文字
+  - 使用 Tesseract OCR 直接定位弦号文字
   - 结果通过线程安全队列传递给主线程渲染
   - 支持通过 config 开关控制是否启用
+
+依赖：
+  - 系统：sudo apt install tesseract-ocr tesseract-ocr-chi-sim
+  - Python：pip install pytesseract
 """
 
 from __future__ import annotations
@@ -19,9 +23,17 @@ import time
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Tesseract 语言映射
+_LANG_MAP = {
+    "ch": "chi_sim+eng",
+    "en": "eng",
+    "chi_sim": "chi_sim+eng",
+}
 
 
 @dataclass
@@ -36,7 +48,7 @@ class OCRResult:
 
 class OCRLocator:
     """
-    OCR 弦号定位器 — 独立线程，使用 PaddleOCR 定位船体文字。
+    OCR 弦号定位器 — 独立线程，使用 Tesseract OCR 定位船体文字。
 
     工作流程：
     1. 主线程将 frame 送入输入队列
@@ -54,17 +66,10 @@ class OCRLocator:
         lang: str = "ch",
         max_queue_size: int = 5,
     ):
-        """
-        Args:
-            enabled: 是否启用 OCR 定位线程。
-            use_gpu: 是否使用 GPU 加速 OCR。
-            lang: OCR 语言，"ch" 支持中英文混合。
-            max_queue_size: 输入/输出队列最大深度。
-        """
         self._enabled = enabled
         self._use_gpu = use_gpu
-        self._lang = lang
-        self._ocr = None
+        self._lang = _LANG_MAP.get(lang, lang)
+        self._tesseract_ok = False
 
         # 输入队列：主线程 → OCR 线程
         self._input_queue: Queue = Queue(maxsize=max_queue_size)
@@ -77,37 +82,31 @@ class OCRLocator:
         # 统计
         self._processed_count = 0
         self._total_latency_ms = 0.0
-        self._ocr_failure_count = 0       # OCR 连续失败计数
-        self._ocr_permanently_failed = False  # 标记 OCR 是否已判定为不可用
 
         if enabled:
-            logger.info("OCRLocator 初始化: lang=%s, gpu=%s", lang, use_gpu)
+            logger.info("OCRLocator 初始化: lang=%s (tesseract=%s), gpu=%s", lang, self._lang, use_gpu)
         else:
             logger.info("OCRLocator 已禁用")
 
     def _init_ocr(self) -> None:
-        """延迟初始化 PaddleOCR（首次使用时加载模型）。"""
-        if self._ocr is not None:
+        """延迟初始化 Tesseract OCR。"""
+        if self._tesseract_ok:
             return
         try:
-            from paddleocr import PaddleOCR
-            # PaddleOCR 3.x API (PP-OCRv5)
-            self._ocr = PaddleOCR(
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=True,
-                lang=self._lang,
-                text_det_thresh=0.3,
-                text_det_box_thresh=0.5,
-                text_recognition_batch_size=1,
+            import pytesseract
+            # 验证 Tesseract 可用
+            pytesseract.get_tesseract_version()
+            self._tesseract_ok = True
+            logger.info("Tesseract OCR 初始化成功 (lang=%s)", self._lang)
+        except ImportError:
+            logger.error(
+                "pytesseract 未安装。请执行: pip install pytesseract\n"
+                "并安装系统包: sudo apt install tesseract-ocr tesseract-ocr-chi-sim"
             )
-            logger.info("PaddleOCR 模型加载完成")
         except Exception as e:
-            logger.error("PaddleOCR 初始化失败: %s", e)
-            self._ocr = None
+            logger.error("Tesseract OCR 初始化失败: %s\n请确认已安装: sudo apt install tesseract-ocr tesseract-ocr-chi-sim", e)
 
     def start(self) -> None:
-        """启动 OCR 定位线程。"""
         if not self._enabled:
             logger.debug("OCR 定位线程未启用，跳过启动")
             return
@@ -126,7 +125,6 @@ class OCRLocator:
         logger.info("OCR 定位线程已启动")
 
     def stop(self, timeout: float = 5.0) -> None:
-        """停止 OCR 定位线程。"""
         thread = self._thread
         if thread is None:
             return
@@ -134,20 +132,15 @@ class OCRLocator:
         self._stop_event.set()
         thread.join(timeout=timeout)
         if thread.is_alive():
-            logger.warning("OCR 定位线程未在超时内退出（daemon 线程，进程退出时自动回收）")
+            logger.warning("OCR 定位线程未在超时内退出")
         self._thread = None
 
-        # 排空队列
-        while True:
-            try:
-                self._input_queue.get_nowait()
-            except Empty:
-                break
-        while True:
-            try:
-                self._output_queue.get_nowait()
-            except Empty:
-                break
+        for q in (self._input_queue, self._output_queue):
+            while True:
+                try:
+                    q.get_nowait()
+                except Empty:
+                    break
 
         logger.info(
             "OCR 定位线程已停止，共处理 %d 帧，平均延迟 %.1fms",
@@ -156,24 +149,11 @@ class OCRLocator:
         )
 
     def submit_frame(self, frame: np.ndarray, frame_id: int) -> bool:
-        """
-        提交一帧给 OCR 线程处理。
-
-        Args:
-            frame: BGR 帧图像。
-            frame_id: 帧编号。
-
-        Returns:
-            True 提交成功，False 队列满或未启用。
-        """
         if not self._enabled:
             return False
-
-        # 先检查线程是否存活（避免无意义的入队）
         thread = self._thread
         if thread is None or not thread.is_alive():
             return False
-
         try:
             self._input_queue.put_nowait({
                 "frame": frame.copy(),
@@ -184,19 +164,12 @@ class OCRLocator:
             return False
 
     def get_result(self, timeout: float = 0.0) -> OCRResult | None:
-        """
-        获取最新的 OCR 定位结果（非阻塞或带超时）。
-
-        Returns:
-            OCRResult 或 None（无结果时）。
-        """
         try:
             return self._output_queue.get(timeout=timeout)
         except Empty:
             return None
 
     def drain_results(self) -> list[OCRResult]:
-        """排空所有可用的 OCR 结果。"""
         results = []
         while True:
             try:
@@ -206,11 +179,10 @@ class OCRLocator:
         return results
 
     def _worker_loop(self) -> None:
-        """OCR 工作线程主循环。"""
         self._init_ocr()
 
-        if self._ocr is None:
-            logger.error("OCR 未初始化，工作线程退出")
+        if not self._tesseract_ok:
+            logger.error("Tesseract OCR 未就绪，工作线程退出")
             return
 
         logger.info("OCR 工作线程开始处理")
@@ -219,10 +191,6 @@ class OCRLocator:
             try:
                 task = self._input_queue.get(timeout=0.5)
             except Empty:
-                continue
-
-            # OCR 已判定不可用，直接跳过
-            if self._ocr_permanently_failed:
                 continue
 
             frame = task["frame"]
@@ -235,16 +203,13 @@ class OCRLocator:
             self._processed_count += 1
             self._total_latency_ms += latency_ms
 
-            # 放入输出队列（满了就丢弃旧的，保证不阻塞）
             try:
                 self._output_queue.put_nowait(result)
             except Exception:
-                # 队列满，尝试丢弃最旧的为新结果腾出空间
                 try:
                     self._output_queue.get_nowait()
                 except Empty:
                     pass
-                # 无论丢弃是否成功，都尝试放入新结果
                 try:
                     self._output_queue.put_nowait(result)
                 except Exception:
@@ -252,88 +217,86 @@ class OCRLocator:
 
     def _process_frame(self, frame: np.ndarray, frame_id: int) -> OCRResult:
         """
-        对单帧执行 OCR 文字检测与识别。
-
-        Args:
-            frame: BGR 帧。
-            frame_id: 帧编号。
-
-        Returns:
-            OCRResult 包含检测到的文字框、文字内容、置信度。
+        对单帧执行 OCR：先用 OpenCV 检测文字区域，再用 Tesseract 识别。
         """
+        import pytesseract
+
         result = OCRResult(frame_id=frame_id, timestamp=time.time())
 
         try:
-            # PaddleOCR 2.x 用 .ocr(cls=True)，3.x 用 .predict()
-            try:
-                ocr_output = self._ocr.ocr(frame, cls=True)
-            except TypeError:
-                ocr_output = self._ocr.predict(frame)
+            # 1. 预处理：灰度 → 自适应二值化 → 形态学
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            binary = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 10
+            )
+            # 膨胀文字区域使其连通
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (18, 3))
+            dilated = cv2.dilate(binary, kernel, iterations=1)
+
+            # 2. 查找文字区域轮廓
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            h_frame, w_frame = frame.shape[:2]
+            min_area = (h_frame * w_frame) * 0.0003   # 最小面积阈值
+            max_area = (h_frame * w_frame) * 0.15     # 最大面积阈值
+
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                area = w * h
+
+                # 过滤：太小或太大的区域
+                if area < min_area or area > max_area:
+                    continue
+                # 过滤：宽高比不合理（文字区域通常宽 > 高）
+                if w < h * 0.5:
+                    continue
+
+                # 裁剪区域（带少量 padding）
+                pad = 5
+                x1 = max(0, x - pad)
+                y1 = max(0, y - pad)
+                x2 = min(w_frame, x + w + pad)
+                y2 = min(h_frame, y + h + pad)
+                roi = frame[y1:y2, x1:x2]
+
+                if roi.size == 0:
+                    continue
+
+                # 3. Tesseract 识别
+                try:
+                    text = pytesseract.image_to_string(
+                        roi, lang=self._lang, config="--psm 7 --oem 3"
+                    ).strip()
+
+                    # 过滤：空结果或太短
+                    if not text or len(text) < 2:
+                        continue
+
+                    # 获取置信度
+                    try:
+                        data = pytesseract.image_to_data(
+                            roi, lang=self._lang, config="--psm 7 --oem 3",
+                            output_type=pytesseract.Output.DICT
+                        )
+                        confs = [int(c) for c in data["conf"] if int(c) > 0]
+                        conf = sum(confs) / len(confs) / 100.0 if confs else 0.0
+                    except Exception:
+                        conf = 0.0
+
+                    # 构造四点框
+                    box = np.array([
+                        [x1, y1], [x2, y1], [x2, y2], [x1, y2]
+                    ], dtype=np.int32)
+
+                    result.boxes.append(box)
+                    result.texts.append(text)
+                    result.confidences.append(conf)
+
+                except Exception:
+                    continue
+
         except Exception as e:
-            self._ocr_failure_count += 1
-            if self._ocr_failure_count <= 3:
-                logger.warning("OCR 处理异常 (frame=%d): %s", frame_id, e)
-            elif self._ocr_failure_count == 4:
-                logger.warning("OCR 持续失败，后续警告已抑制。可能是 PaddlePaddle PIR+OneDNN 兼容性问题。")
-                self._ocr_permanently_failed = True
-            return result
-
-        if not ocr_output:
-            return result
-
-        # OCR 成功，重置失败计数
-        self._ocr_failure_count = 0
-        self._ocr_permanently_failed = False
-
-        # 调试：打印 PaddleOCR 输出格式（只打印前 3 帧）
-        if frame_id <= 3:
-            logger.warning("OCR DEBUG frame=%d type=%s output=%s", frame_id, type(ocr_output).__name__, str(ocr_output)[:500])
-
-        # 兼容 2.x 和 3.x 输出格式
-        # 2.x: [[ [box, (text, conf)], ... ]]
-        # 3.x dict: [ { "rec_texts": [...], "rec_scores": [...], "dt_polys": [...] } ]
-        # 3.x object: [ OCRResult_obj ]
-        if isinstance(ocr_output, list) and len(ocr_output) > 0:
-            first = ocr_output[0]
-        else:
-            return result
-
-        # 3.x dict 格式
-        if isinstance(first, dict):
-            texts = first.get("rec_texts", [])
-            scores = first.get("rec_scores", [])
-            polys = first.get("dt_polys", [])
-            for i in range(min(len(texts), len(polys))):
-                text = str(texts[i]).strip()
-                conf = float(scores[i]) if i < len(scores) else 0.0
-                box = np.array(polys[i], dtype=np.int32)
-                result.boxes.append(box)
-                result.texts.append(text)
-                result.confidences.append(conf)
-            return result
-
-        # 2.x list 格式
-        lines = first if isinstance(first, list) else []
-        for line in lines:
-            if line is None or len(line) < 2:
-                continue
-
-            box_data = line[0]  # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            text_info = line[1]  # (text, confidence)
-
-            if isinstance(text_info, tuple) and len(text_info) >= 2:
-                text = str(text_info[0]).strip()
-                conf = float(text_info[1])
-            else:
-                text = str(text_info).strip()
-                conf = 0.0
-
-            # 转换为 numpy 数组
-            box = np.array(box_data, dtype=np.int32)
-
-            result.boxes.append(box)
-            result.texts.append(text)
-            result.confidences.append(conf)
+            logger.warning("OCR 处理异常 (frame=%d): %s", frame_id, e)
 
         if result.boxes:
             logger.debug(
@@ -354,7 +317,6 @@ class OCRLocator:
 
     @property
     def stats(self) -> dict:
-        """返回统计信息。"""
         avg = self._total_latency_ms / max(1, self._processed_count)
         return {
             "processed_frames": self._processed_count,

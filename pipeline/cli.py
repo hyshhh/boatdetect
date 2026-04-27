@@ -6,23 +6,6 @@ Pipeline CLI — 视频处理命令行入口
 """
 from __future__ import annotations
 
-# ═══════════════════════════════════════════════════════════════════════
-# PaddlePaddle 3.x PIR + OneDNN 兼容性 bug 绕过。
-# 环境变量对 gflags 无效，必须通过 sys.argv 注入命令行参数。
-# ═══════════════════════════════════════════════════════════════════════
-import sys
-sys.argv += [
-    "--enable_new_executor=false",
-    "--use_mkldnn=false",
-    "--enable_pir_api=false",
-]
-
-import os
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["FLAGS_enable_mkldnn"] = "0"
-os.environ["FLAGS_enable_new_executor"] = "0"
-
 import argparse
 import logging
 import sys
@@ -183,10 +166,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # 在 argparse 解析前移除注入的 gflags 参数
-    gflags_args = {"--enable_new_executor", "--use_mkldnn", "--enable_pir_api"}
-    sys.argv = [arg for arg in sys.argv if not any(arg.startswith(f"{g}=") for g in gflags_args)]
-
     parser = build_parser()
     args = parser.parse_args()
 
