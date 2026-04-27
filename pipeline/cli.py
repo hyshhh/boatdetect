@@ -7,9 +7,16 @@ Pipeline CLI — 视频处理命令行入口
 from __future__ import annotations
 
 # ═══════════════════════════════════════════════════════════════════════
-# 必须在 paddle 首次 import 之前设置。
 # PaddlePaddle 3.x PIR + OneDNN 兼容性 bug 绕过。
+# 环境变量对 gflags 无效，必须通过 sys.argv 注入命令行参数。
 # ═══════════════════════════════════════════════════════════════════════
+import sys
+sys.argv += [
+    "--enable_new_executor=false",
+    "--use_mkldnn=false",
+    "--enable_pir_api=false",
+]
+
 import os
 os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["FLAGS_use_mkldnn"] = "0"
