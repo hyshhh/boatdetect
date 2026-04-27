@@ -265,15 +265,20 @@ class OCRLocator:
             except TypeError:
                 ocr_output = self._ocr.predict(frame)
         except Exception as e:
-            logger.debug("OCR 处理异常 (frame=%d): %s", frame_id, e)
+            logger.warning("OCR 处理异常 (frame=%d): %s", frame_id, e)
             return result
 
         if not ocr_output:
             return result
 
+        # 调试：打印 PaddleOCR 输出格式（只打印前 3 帧）
+        if frame_id <= 3:
+            logger.warning("OCR DEBUG frame=%d type=%s output=%s", frame_id, type(ocr_output).__name__, str(ocr_output)[:500])
+
         # 兼容 2.x 和 3.x 输出格式
         # 2.x: [[ [box, (text, conf)], ... ]]
-        # 3.x: [ { "rec_texts": [...], "rec_scores": [...], "dt_polys": [...] } ]
+        # 3.x dict: [ { "rec_texts": [...], "rec_scores": [...], "dt_polys": [...] } ]
+        # 3.x object: [ OCRResult_obj ]
         if isinstance(ocr_output, list) and len(ocr_output) > 0:
             first = ocr_output[0]
         else:
