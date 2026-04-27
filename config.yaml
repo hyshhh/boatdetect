@@ -115,3 +115,4 @@ pipeline:
     use_gpu: false
     lang: "ch"
     max_queue_size: 5
+    every_n_frames: 3          # 每 N 帧提交一次 OCR（1=每帧，3=每3帧）
