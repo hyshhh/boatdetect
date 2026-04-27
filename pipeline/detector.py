@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 class Detection:
     """单个检测结果。"""
     track_id: int
-    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2)
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 原始检测框
     confidence: float
-    crop: np.ndarray | None = None   # 裁剪的图像区域
+    crop: np.ndarray | None = None   # 裁剪的图像区域（可能含 padding）
+    crop_offset: tuple[int, int] = (0, 0)  # crop 左上角在 frame 中的偏移
 
 
 def _build_tracker_yaml(
@@ -210,6 +211,7 @@ class ShipDetector:
                 bbox=(x1, y1, x2, y2),
                 confidence=conf,
                 crop=crop,
+                crop_offset=(cx1, cy1),
             ))
 
         if detections:

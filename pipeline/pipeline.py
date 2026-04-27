@@ -466,7 +466,7 @@ class ShipPipeline:
             )
 
             # crop 在 frame 中的偏移（用于 OCR 坐标转换）
-            crop_offset = (det.bbox[0], det.bbox[1])
+            crop_offset = det.crop_offset
 
             try:
                 # OCR 与 Agent 并行
@@ -529,7 +529,7 @@ class ShipPipeline:
                 "timestamp": time.time(),
                 "track_id": det.track_id,
                 "crop": det.crop.copy(),
-                "crop_offset": (det.bbox[0], det.bbox[1]),
+                "crop_offset": det.crop_offset,
             }
 
             try:
