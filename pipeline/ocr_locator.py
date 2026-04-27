@@ -94,7 +94,6 @@ class OCRLocator:
             self._ocr = PaddleOCR(
                 use_textline_orientation=True,
                 lang=self._lang,
-                show_log=False,
                 text_det_thresh=0.3,
                 text_det_box_thresh=0.5,
                 text_recognition_batch_size=1,
@@ -258,15 +257,43 @@ class OCRLocator:
         result = OCRResult(frame_id=frame_id, timestamp=time.time())
 
         try:
-            ocr_output = self._ocr.ocr(frame, cls=True)
+            # PaddleOCR 2.x 用 .ocr(cls=True)，3.x 用 .predict()
+            try:
+                ocr_output = self._ocr.ocr(frame, cls=True)
+            except TypeError:
+                ocr_output = self._ocr.predict(frame)
         except Exception as e:
             logger.debug("OCR 处理异常 (frame=%d): %s", frame_id, e)
             return result
 
-        if not ocr_output or not ocr_output[0]:
+        if not ocr_output:
             return result
 
-        for line in ocr_output[0]:
+        # 兼容 2.x 和 3.x 输出格式
+        # 2.x: [[ [box, (text, conf)], ... ]]
+        # 3.x: [ { "rec_texts": [...], "rec_scores": [...], "dt_polys": [...] } ]
+        if isinstance(ocr_output, list) and len(ocr_output) > 0:
+            first = ocr_output[0]
+        else:
+            return result
+
+        # 3.x dict 格式
+        if isinstance(first, dict):
+            texts = first.get("rec_texts", [])
+            scores = first.get("rec_scores", [])
+            polys = first.get("dt_polys", [])
+            for i in range(min(len(texts), len(polys))):
+                text = str(texts[i]).strip()
+                conf = float(scores[i]) if i < len(scores) else 0.0
+                box = np.array(polys[i], dtype=np.int32)
+                result.boxes.append(box)
+                result.texts.append(text)
+                result.confidences.append(conf)
+            return result
+
+        # 2.x list 格式
+        lines = first if isinstance(first, list) else []
+        for line in lines:
             if line is None or len(line) < 2:
                 continue
 
