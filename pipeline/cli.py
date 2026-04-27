@@ -250,7 +250,7 @@ def main() -> None:
         f"提示词: {prompt_mode}\n"
         f"Demo: {'[green]开启[/green]' if demo_enabled else '[dim]关闭[/dim]'}\n"
         f"YOLO: {yolo_model}\n"
-        f"OCR定位: {'[green]开启[/green] (PaddleOCR)' if ocr_enabled else '[dim]关闭[/dim]'}",
+        f"OCR定位: {'[green]开启[/green] (OpenCV)' if ocr_enabled else '[dim]关闭[/dim]'}",
         title="启动配置",
     ))
 
