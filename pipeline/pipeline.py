@@ -469,15 +469,23 @@ class ShipPipeline:
             crop_offset = det.crop_offset
 
             try:
-                # OCR 与 Agent 并行
+                # OCR 先提交（异步，与 Agent 并行）
                 ocr_future = self._ocr_executor.submit(
                     self._ocr_locator.detect, det.crop, frame_id, crop_offset
                 )
+
+                # Agent 识别（同步，与 OCR 并行执行中）
                 agent_result = self._run_recognition(det.crop, track_id=det.track_id, frame_id=frame_id)
 
-                # 等 OCR 完成
-                ocr_result = ocr_future.result(timeout=5.0)
-                self._tracker.bind_ocr_boxes(det.track_id, ocr_result.boxes)
+                # 等 OCR 完成（失败不影响 Agent 结果）
+                ocr_boxes = []
+                try:
+                    ocr_result = ocr_future.result(timeout=5.0)
+                    ocr_boxes = ocr_result.boxes
+                except Exception as ocr_err:
+                    logger.warning("OCR 定位失败 (track=%d, frame=%d): %s", det.track_id, frame_id, ocr_err)
+
+                self._tracker.bind_ocr_boxes(det.track_id, ocr_boxes)
 
                 self._log_agent_trace(
                     "recognition_result",
@@ -487,7 +495,7 @@ class ShipPipeline:
                         f"弦号={agent_result.hull_number or '(无)'} "
                         f"匹配={agent_result.match_type} "
                         f"语义候选={agent_result.semantic_match_ids} "
-                        f"OCR框={len(ocr_result.boxes)}"
+                        f"OCR框={len(ocr_boxes)}"
                     ),
                 )
                 self._handle_agent_result(det.track_id, frame_id, agent_result)
@@ -594,6 +602,8 @@ class ShipPipeline:
                 except queue.Full:
                     logger.warning("结果队列已满，丢弃结果 (track=%d, frame=%d)", track_id, frame_id)
                     self._tracker.bind_result(track_id, hull_number="", description="", frame_id=frame_id)
+                    if ocr_boxes:
+                        self._tracker.bind_ocr_boxes(track_id, ocr_boxes)
         except Exception:
             logger.exception("Agent 工作线程意外退出")
 
