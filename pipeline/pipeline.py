@@ -32,6 +32,7 @@ from pipeline.output import ScreenshotSaver
 from pipeline.fps import FPSMeter, LatencyMeter
 from pipeline.tracker import TrackManager
 from pipeline.video_input import InputSource
+from pipeline.ocr_locator import OCRLocator
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,15 @@ class ShipPipeline:
         # 截图保存器
         output_dir = pipe_cfg.get("output_dir", "./output")
         self._saver = ScreenshotSaver(output_dir=output_dir)
+
+        # OCR 弦号定位线程（独立于主线程）
+        ocr_cfg = pipe_cfg.get("ocr_locator", {})
+        self._ocr_locator = OCRLocator(
+            enabled=bool(ocr_cfg.get("enabled", True)),
+            use_gpu=bool(ocr_cfg.get("use_gpu", False)),
+            lang=ocr_cfg.get("lang", "ch"),
+            max_queue_size=ocr_cfg.get("max_queue_size", 5),
+        )
 
         # 并发模式相关
         self._task_queue: queue.Queue = queue.Queue(
@@ -624,8 +634,9 @@ class ShipPipeline:
         frame: np.ndarray,
         detections: list[Detection],
         frame_id: int,
+        ocr_result=None,
     ) -> np.ndarray:
-        """通过 DemoRenderer 在帧上绘制检测框、识别结果和 HUD。"""
+        """通过 DemoRenderer 在帧上绘制检测框、识别结果、HUD 和 OCR 定位虚线框。"""
         return self._renderer.render(
             frame=frame,
             detections=detections,
@@ -634,6 +645,7 @@ class ShipPipeline:
             frame_id=frame_id,
             queue_depth=self._task_queue.qsize(),
             max_queue=self._max_queued_frames,
+            ocr_result=ocr_result,
         )
 
     # ── 主流程 ──────────────────────────────────
@@ -685,6 +697,9 @@ class ShipPipeline:
             if self._concurrent_mode:
                 self._start_agent_workers()
 
+            # 启动 OCR 定位线程
+            self._ocr_locator.start()
+
             logger.info(
                 "开始处理: source=%s, mode=%s, inference=%s, demo=%s, refresh=%s(gap=%d), detect_every=%d, process_every=%d",
                 source,
@@ -709,6 +724,9 @@ class ShipPipeline:
 
                 # FPS 统计
                 self._fps.tick("stream")
+
+                # ── 提交帧给 OCR 定位线程（独立并行，不阻塞主线程）──
+                self._ocr_locator.submit_frame(frame, frame_id)
 
                 # ── 每 N 帧进行 YOLO 检测，其余帧复用上次结果 ──
                 should_detect = (frame_id % self._detect_every_n == 0)
@@ -750,9 +768,14 @@ class ShipPipeline:
 
                 # 渲染输出
                 if self._demo_enabled or output_path or display:
+                    # 收集 OCR 定位结果（非阻塞）
+                    ocr_result = self._ocr_locator.get_result(timeout=0.0)
+
                     with self._latency.measure("demo"):
-                        display_frame = self._render_frame(frame, last_detections, frame_id)
+                        display_frame = self._render_frame(frame, last_detections, frame_id, ocr_result=ocr_result)
                 else:
+                    # 即使不渲染，也要排空 OCR 结果队列防止堆积
+                    self._ocr_locator.drain_results()
                     display_frame = frame
 
                 # 每 N 帧：有已识别的 track 就保存截图（需开启 save_screenshots）
@@ -805,9 +828,11 @@ class ShipPipeline:
                             trace_str = f" | 近期处理: {recent_tracks} tracks"
 
                     logger.info(
-                        "FPS: stream=%.1f process=%.1f | frames=%d elapsed=%ds tracks=%d%s%s",
+                        "FPS: stream=%.1f process=%.1f | frames=%d elapsed=%ds tracks=%d%s%s | OCR: %d frames %.1fms avg",
                         stream_fps, process_fps, frame_id, int(elapsed),
                         len(self._tracker), latency_str, trace_str,
+                        self._ocr_locator.stats["processed_frames"],
+                        self._ocr_locator.stats["avg_latency_ms"],
                     )
 
             # ── 处理完成，收集统计 ──
@@ -831,6 +856,7 @@ class ShipPipeline:
                 "inference": "agent" if self._use_agent else "hardcoded",
                 "screenshots_saved": self._saver.saved_count,
                 "latency": self._latency.get_all_stats(),
+                "ocr_locator": self._ocr_locator.stats,
             }
 
             logger.info("=" * 50)
@@ -863,6 +889,7 @@ class ShipPipeline:
         finally:
             if self._concurrent_mode:
                 self._stop_agent_workers()
+            self._ocr_locator.stop()
             input_src.release()
             if video_writer:
                 video_writer.release()

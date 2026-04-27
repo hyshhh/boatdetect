@@ -106,3 +106,12 @@ pipeline:
 
   # 超过此帧数未出现的 track 被清理
   max_stale_frames: 300
+
+  # OCR 弦号定位线程配置
+  # 独立于主线程，使用 PaddleOCR 直接定位船体上的文字区域
+  # 定位结果以虚线框绘制在画面上，与主线程的检测框 demo 互不冲突
+  ocr_locator:
+    enabled: true
+    use_gpu: false
+    lang: "ch"
+    max_queue_size: 5

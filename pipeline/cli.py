@@ -243,6 +243,7 @@ def main() -> None:
     prompt_mode = config["pipeline"].get("prompt_mode", "detailed")
     demo_enabled = config["pipeline"].get("demo", False)
     yolo_model = config["pipeline"].get("yolo_model", "yolov8n.pt")
+    ocr_enabled = config["pipeline"].get("ocr_locator", {}).get("enabled", True)
 
     # 显示启动信息
     console.print(Panel(
@@ -256,7 +257,8 @@ def main() -> None:
         f"定时刷新: {'[green]开启[/green] (每%d帧)' % gap_num if enable_refresh else '[dim]关闭[/dim]'}\n"
         f"提示词: {prompt_mode}\n"
         f"Demo: {'[green]开启[/green]' if demo_enabled else '[dim]关闭[/dim]'}\n"
-        f"YOLO: {yolo_model}",
+        f"YOLO: {yolo_model}\n"
+        f"OCR定位: {'[green]开启[/green] (PaddleOCR)' if ocr_enabled else '[dim]关闭[/dim]'}",
         title="启动配置",
     ))
 

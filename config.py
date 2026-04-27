@@ -60,6 +60,12 @@ _DEFAULTS: dict[str, Any] = {
         },
         "detect_classes": [8],
         "max_stale_frames": 300,
+        "ocr_locator": {
+            "enabled": True,
+            "use_gpu": False,
+            "lang": "ch",
+            "max_queue_size": 5,
+        },
     },
     "app": {
         "log_level": "INFO",
