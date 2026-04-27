@@ -3,6 +3,20 @@ Pipeline CLI — 视频处理命令行入口
 
 用法:
     python -m pipeline.cli <source> [options]
+"""
+
+# ═══════════════════════════════════════════════════════════════════════
+# 必须在所有其他 import 之前设置，确保 paddle 首次 import 时读到这些值。
+# PaddlePaddle 3.x 的 PIR + OneDNN 有兼容性 bug：
+#   ConvertPirAttribute2RuntimeAttribute not support
+#   [pir::ArrayAttribute<pir::DoubleAttribute>]
+# 通过禁用 OneDNN 绕过。
+# ═══════════════════════════════════════════════════════════════════════
+import os
+os.environ["FLAGS_enable_pir_api"] = "0"
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["FLAGS_enable_mkldnn"] = "0"
+os.environ["FLAGS_enable_new_executor"] = "0"
 
 示例:
     python -m pipeline.cli video.mp4

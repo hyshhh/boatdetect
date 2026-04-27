@@ -89,16 +89,15 @@ class OCRLocator:
             return
         try:
             from paddleocr import PaddleOCR
-            # PaddleOCR 2.x API — 不受 PaddlePaddle 3.x PIR+OneDNN bug 影响
-            # 使用 PP-OCRv4 模型，识别效果好且稳定
+            # PaddleOCR 3.x API (PP-OCRv5)
             self._ocr = PaddleOCR(
-                use_angle_cls=True,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=True,
                 lang=self._lang,
-                det_db_thresh=0.3,
-                det_db_box_thresh=0.5,
-                rec_batch_num=1,
-                use_gpu=self._use_gpu,
-                show_log=False,
+                text_det_thresh=0.3,
+                text_det_box_thresh=0.5,
+                text_recognition_batch_size=1,
             )
             logger.info("PaddleOCR 模型加载完成")
         except Exception as e:
